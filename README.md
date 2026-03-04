@@ -1,170 +1,291 @@
-# Explainable Attention Based Deepfake Detector
-The project consist a Video Deepfake detector based on hybrid EfficientNet CNN and Vision Transformer architecture. The model inference results can be analyzed and explained by rendering a (heatmap) visualization based on a Relevancy map calculated from the Attention layers of the Transformer, overlayed on the input face image.
+Explainable Deepfake Detection using ConvNeXt + Vision Transformer
 
-![Explainable Attention Based Deepfake Detector](https://user-images.githubusercontent.com/93251301/157253542-47192d3e-c7f7-4aa0-bbd2-039738d8fba3.png)
+A hybrid ConvNeXt–Vision Transformer deepfake detector with attention-based explainability for analyzing manipulated face images extracted from videos.
 
-In addition, the project enables to re-train and test the model performence and explainability with new parameters.
+This project implements a deepfake detection framework that:
 
-## How to Install  
-- [ ] Clone the repository and move into it:
-```
-git clone https://github.com/noame12/Explainable_Attention_Based_Deepfake_Detector.git
-cd Explainable_Attention_Based_Deepfake_Detector
-```
-- [ ] Setup Python environment using Conda:
-```
-conda env create --file environment.yml
-conda activate explain_deepfakes
-export PYTHONPATH=.
-```
-## Run the Explanation process on the deepfake detection model
-**System requirements:**
-To run the explanability process on more than 5 face images, a machine with Tesla T4 (or stronger) GPU is required. 
+Uses ConvNeXt + Vision Transformer architecture for feature extraction and classification
 
-- [ ] Move to model explanation directory: 
-```
-cd  explain_model
-```
+Supports training, evaluation, and inference
 
-- [ ] Create an input directory for the input face images:
-```
-mkdir examples
-```
-- [ ] Download the face images from the [samples](https://drive.google.com/drive/folders/1-JtWGMyd7YaTa56R6uYpjvwmUyW5q-zN?usp=sharing) drive into the newly created local _'examples'_ directory.
+Generates explainable attention heatmaps highlighting manipulated regions
 
-The samples drive contains 600 samples of face image extractions from 600 test videos. It consists of 100 images for each of the five deepfake methods – Face2Face, FaceShift, FaceSwap, NeuralTextures and Deepfakes, as well as 100 untouched real (aka Original) face images.
+Works with multiple datasets including FaceForensics++ deepfake methods
 
-An exhaustive list of the face image files for running the explainability method is provided in [test_summary_All600_examples.csv](https://github.com/noame12/Explainable_Attention_Based_Deepfake_Detector/blob/master/Explain_model/test_summary_All600_examples.csv) file in the _'explain_model'_ directory. To run the test on a subset of the list, extract a customized list from the exhaustive list.
+The system provides a pipeline for:
 
-**!Note:** Make sure to keep the same .csv file name or update the name in the _explain_model.py_ file (line 111) prior to running the _explain_model.py_ module.
+Video preprocessing
 
-- [ ] Run the explanation visualization process:
-```
-python explain_model.py
-```
+Face extraction
 
-The output of the explanation process can be viewed in the _‘explanation’_ directory (created automatically)
-![explanation process output](https://user-images.githubusercontent.com/93251301/157272590-774cf7d6-172d-48d0-8a44-1c3996f12507.png)
+Model training
 
+Model evaluation
 
-The results of the explanability process run on all examples in advance can be seen in the [visualization results drive](https://drive.google.com/drive/folders/1fxi-ilXykkq-RXwbNRtrwdicxKROrHae?usp=sharing) .
+Attention-based explainability
 
+Project Overview
 
+Deepfake detection is a critical task in combating misinformation and media manipulation.
+This project combines modern convolutional networks (ConvNeXt) with transformer attention mechanisms to detect facial manipulations and provide interpretable explanations of predictions.
 
-## Test the deepfake detection model
-The test module enables to test the performance of the deepfake detector. 
-The input data to the model is the test (or verification) dataset of face images extracted from the fake and real video sequences. 
-The test process generates four outputs:
--	Accuracy, AUC (Area Under Curve) and F1 scores of the classifier
--	ROC diagram
--	A .txt file with the classification results for each video sequence
--	A .csv list of face image files – one sample per each video.
+The explainability module produces relevancy heatmaps derived from transformer attention layers, helping visualize which facial regions influence the model’s decisions.
 
-**System requirements:**
-To run the test process, a machine with **two** Tesla T4 (or stronger) GPUs is required. 
+Repository Structure
+deepfake_convnextvit
+│
+├── deep_fakes_explain
+│   ├── dataset
+│   │   ├── training_set
+│   │   ├── validation_set
+│   │   └── test_set
+│   │
+│   ├── FaceForensics
+│   └── models
+│
+├── preprocessing
+│   ├── detect_faces.py
+│   ├── extract_crops.py
+│   └── face_detector.py
+│
+├── model_test_train
+│   ├── train_model.py
+│   ├── test_model.py
+│   ├── convnext_crossvit.py
+│   ├── deepfakes_dataset.py
+│   └── configs
+│
+├── explain_model
+│   ├── explain_model.py
+│   ├── examples
+│   └── explanation
+│
+├── environment.yml
+└── README.md
+Installation
+1. Clone the repository
+git clone https://github.com/gokul028h/deepfake_convnextvit.git
+cd deepfake_convnextvit
+2. Create the Python environment
 
+Using Conda:
 
-![Data flow](https://user-images.githubusercontent.com/93251301/157474640-5a6d5237-297d-42df-a7b3-0de615ff3a64.png)
+conda env create -f environment.yml
+conda activate deepfake_env
 
-### Get the data
-- [ ] Download and extract the dataset:
-[FaceForensic++](https://github.com/ondyari/FaceForensics/blob/master/dataset/)
+or install manually using pip if needed.
 
-The videos should be downloaded under _'/deep_fakes_exaplain/dataset'_ directory.
+Dataset Setup
 
-### Preprocess the data
-To perform deepfake detection it is first necessary to identify and extract the faces from all the videos in the dataset.
+The repository does not include datasets due to size limitations.
 
-- [ ] Detect the faces inside the videos:
-```
+Download the datasets separately and place them inside:
+
+deep_fakes_explain/dataset/
+
+Required structure:
+
+dataset
+├── training_set
+│   ├── Deepfakes
+│   └── Original
+│
+├── validation_set
+│   ├── Deepfakes
+│   └── Original
+│
+└── test_set
+    ├── Deepfakes
+    └── Original
+
+Each dataset folder should contain video folders with extracted face frames:
+
+Deepfakes
+ ├ video_001
+ │  ├ 0_0.png
+ │  ├ 1_0.png
+ │  └ ...
+ ├ video_002
+ │  ├ 0_0.png
+ │  └ ...
+Data Preprocessing
+
+To run deepfake detection, faces must first be extracted from the videos.
+
+Detect Faces
 cd preprocessing
-```
-```
-python detect_faces.py --data_path /deep_fakes_exaplain/dataset --dataset: FACEFORENSICS
-```
-**!Note:** The default dataset for the detect_faces.py module is DFDC, therefore it is important to specify the --dataset parameter as described above.
 
-The detected face boxes (coordinates) will be saved inside the "/deep_fakes_exaplain/dataset/boxes" folder.
-![image](https://user-images.githubusercontent.com/93251301/157497703-050bf9c2-4962-49fe-b559-44f1ac3ab04e.png)
+python detect_faces.py \
+--data_path ../deep_fakes_explain/dataset \
+--dataset FACEFORENSICS
 
+Detected bounding boxes are saved to:
 
-- [ ] Extract the detected faces obtaining the images:
-```
-python extract_crops.py --data_path deep_fakes_explain/dataset --output_path deep_fakes_explain/dataset/training_set
+deep_fakes_explain/dataset/boxes/
+Extract Face Crops
+python extract_crops.py \
+--data_path ../deep_fakes_explain/dataset \
+--output_path ../deep_fakes_explain/dataset/training_set \
 --dataset FACEFORENSIC
-```
-Repeat detection and extraction for all the different parts of your dataset. The --output_path parameter above is set to the training_set directory. You should repeat the process also for the validation_set and test_set directories.
-The folders’ structure should look as follows: 
-![image](https://user-images.githubusercontent.com/93251301/157499273-4c171cad-7163-4209-b7ac-e8d968cffa41.png)
 
-Each (fake) method directory contain directories for all videos. Each video directory contain all face extraction files, for that video, in .png format.
+Repeat extraction for:
 
-```
-    - training_set
-        - Deepfakes
-            - video_name_0
-                0_0.png
-                1_0.png
-                ...
-                N_0.png
-            ...
-            - video_name_K
-                0_0.png
-                1_0.png
-                ...
-                M_0.png
-        - Face2Face
-        - FaceShifter
-        - FaceSwap
-        - NeuralTextures
-        - Original
-    - validation_set
-        ...
-            ...
-                ...
-    - test_set
-        ...
-            ...
-```
-### Test the model
-- [ ] Move into the test module folder:
-```
+training_set
+validation_set
+test_set
+Training the Model
+
+Navigate to the training module:
+
 cd model_test_train
-```
-- [ ] Run the following command for evaluating the deepfake detector model providing the pre-trained model path and the configuration file available in the config directory:
-```
-python test_model.py --model_path ../deep_fakes_explain/models/efficientnetB0_checkpoint72_All --config configs/explained_architecture.yaml
-```
-By default, the command will test on All datasets but you can customize the following parameters:
-- --dataset: Which dataset to use (Deepfakes|Face2Face|FaceShifter|FaceSwap|NeuralTextures|Original|All)
-- --workers: Number of data loader workers (default: 16)
-- --frames_per_video: Number of equidistant frames for each video (default: 20)
-- --batch_size: Prediction Batch Size (default: 12)
 
-The results of the test process are saved in the _'results/tests'_ directory.
+Run training:
 
-## Train the model
-The train module enables to re-train the model with different parameters. Re-training may be desired for verifying or testing any thesis for improving model performance or explainability.
+python train_model.py \
+--config configs/explained_architecture.yaml \
+--dataset Deepfakes
+Optional Parameters
+--num_epochs      Number of epochs (default: 100)
+--workers         Data loader workers (default: 16)
+--resume          Resume from checkpoint
+--dataset         Dataset to train on
+--max_videos      Limit number of videos
+--patience        Early stopping patience
 
-To evaluate a customized model trained from scratch with a different architecture, you need to edit the configs/explained_architecture.yaml file.
+Trained models are saved to:
 
-**System requirements:**
-A machine with **two** Tesla T4 (or stronger) GPUs, CPU with 16 vCPUs and 100G RAM.
+deep_fakes_explain/models/
+Testing the Model
 
-To train the model using my architecture configuration:
-- [ ] Verify that you are in _‘model_test_train’_ directory
-- [ ] Run the train module
-```
-python train_model.py --config configs/explained_architecture.yaml
-```
-By default the command will train on All method datasets but you can customize the following parameters:
-- --num_epochs: Number of training epochs (default: 100)
-- --workers: Number of data loader workers (default: 16)
-- --resume: Path to latest checkpoint (default: none)
-- --dataset: Which dataset to use (Deepfakes|Face2Face|FaceShifter|FaceSwap|NeuralTextures|All) (default: All)
-- --max_videos: Maximum number of videos to use for training (default: all)
-- --patience: How many epochs wait before stopping for validation loss not improving (default: 5)
+To evaluate the trained model:
 
-## Credits
-- The Deepfake Detector implementation is based on the [Hybrid EfficientNet Vision Transformer](https://github.com/davide-coccomini/Combining-EfficientNet-and-Vision-Transformers-for-Video-Deepfake-Detection) implementation.
-- The explainability method is based on the  [Transformer MM Explainability](https://github.com/hila-chefer/Transformer-MM-Explainability) implementation.
+cd model_test_train
+
+python test_model.py \
+--model_path ../deep_fakes_explain/models/convnext_crossvit_checkpoint \
+--config configs/explained_architecture.yaml
+
+Outputs include:
+
+Accuracy
+
+AUC score
+
+F1 score
+
+ROC curve
+
+Prediction summaries
+
+Results are saved in:
+
+model_test_train/results/tests
+Explainability (Attention Visualization)
+
+The explainability module generates heatmaps showing important facial regions used for classification.
+
+Navigate to:
+
+cd explain_model
+
+Place input images inside:
+
+explain_model/examples
+
+Run explanation:
+
+python explain_model.py
+
+Output visualizations will appear in:
+
+explain_model/explanation
+Hardware Requirements
+
+Minimum (for testing):
+
+CPU
+
+16GB RAM
+
+Recommended (for training):
+
+NVIDIA GPU (RTX / Tesla)
+
+16+ CPU cores
+
+32GB+ RAM
+
+Large-scale training may require:
+
+2 GPUs
+
+100GB RAM
+
+Model Architecture
+
+The model combines:
+
+ConvNeXt
+
+Used for hierarchical convolutional feature extraction.
+
+Vision Transformer
+
+Processes patch embeddings with multi-head attention.
+
+Cross-Attention Fusion
+
+Combines convolutional features with transformer representations.
+
+Attention Explainability
+
+Relevancy maps are computed from transformer attention weights.
+
+Features
+
+Hybrid ConvNeXt + ViT architecture
+
+Attention-based explainability
+
+Multi-dataset support
+
+Training and evaluation pipelines
+
+GPU acceleration
+
+Deepfake method generalization
+
+Future Improvements
+
+Temporal deepfake detection
+
+Multi-modal detection (audio + video)
+
+Improved explainability maps
+
+Lightweight model deployment
+
+Benchmarking across more datasets
+
+Credits
+
+This implementation builds upon research in:
+
+Vision Transformers
+
+ConvNeXt architecture
+
+Deepfake detection frameworks
+
+Transformer explainability techniques
+
+Author
+
+Gokul
+
+GitHub
+https://github.com/gokul028h
+
+License
+
+This project is provided for research and educational purposes.
