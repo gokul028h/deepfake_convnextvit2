@@ -1,0 +1,62 @@
+# ========================
+# Python cache
+# ========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ========================
+# Virtual environments
+# ========================
+deepfake_env/
+venv/
+env/
+
+# ========================
+# IDE files
+# ========================
+.vscode/
+.idea/
+
+# ========================
+# Dataset (ignore contents)
+# ========================
+deep_fakes_explain/dataset/*
+!deep_fakes_explain/dataset/.gitkeep
+!deep_fakes_explain/dataset/training_set/
+!deep_fakes_explain/dataset/training_set/.gitkeep
+!deep_fakes_explain/dataset/validation_set/
+!deep_fakes_explain/dataset/validation_set/.gitkeep
+!deep_fakes_explain/dataset/test_set/
+!deep_fakes_explain/dataset/test_set/.gitkeep
+
+# ========================
+# Ignore large media
+# ========================
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.zip
+
+# ========================
+# Model weights
+# ========================
+deep_fakes_explain/models/*
+*.pt
+*.pth
+*.ckpt
+
+# ========================
+# Temporary files
+# ========================
+.ipynb_checkpoints/
+*.log
+*.tmp
+
+# ========================
+# OS files
+# ========================
+.DS_Store
+Thumbs.db
