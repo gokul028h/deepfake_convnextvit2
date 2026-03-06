@@ -1,8 +1,34 @@
-
 import torch
 from torch import nn
 import timm
 from einops import rearrange
+
+
+class ArtifactAttention(nn.Module):
+
+    def __init__(self, channels):
+
+        super().__init__()
+
+        self.conv1 = nn.Conv2d(channels, channels // 8, kernel_size=1)
+
+        self.relu = nn.ReLU(inplace=True)
+
+        self.conv2 = nn.Conv2d(channels // 8, 1, kernel_size=1)
+
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+
+        attn = self.conv1(x)
+
+        attn = self.relu(attn)
+
+        attn = self.conv2(attn)
+
+        attn = self.sigmoid(attn)
+
+        return x * attn
 
 
 class CrossAttention(nn.Module):
@@ -20,7 +46,7 @@ class CrossAttention(nn.Module):
 
         self.to_out = nn.Linear(dim, dim)
 
-    def forward(self, x):
+    def forward(self, x, return_attention=False):
 
         B, N, C = x.shape
 
@@ -40,8 +66,12 @@ class CrossAttention(nn.Module):
 
         out = rearrange(out, 'b h n d -> b n (h d)')
 
-        return self.to_out(out)
+        out = self.to_out(out)
 
+        if return_attention:
+            return out, attn
+
+        return out
 
 
 class ConvNeXtCrossViT(nn.Module):
@@ -57,6 +87,8 @@ class ConvNeXtCrossViT(nn.Module):
             global_pool=''
         )
 
+        self.artifact_attention = ArtifactAttention(768)
+
         self.cross_attn = CrossAttention(dim=768)
 
         self.pool = nn.AdaptiveAvgPool1d(1)
@@ -68,14 +100,32 @@ class ConvNeXtCrossViT(nn.Module):
 
         x = self.backbone.forward_features(x)
 
+        x = self.artifact_attention(x)
+
         B, C, H, W = x.shape
 
         x = rearrange(x, 'b c h w -> b (h w) c')
 
         x = self.cross_attn(x)
 
-        x = x.transpose(1,2)
+        x = x.transpose(1, 2)
 
         x = self.pool(x).squeeze(-1)
 
         return self.fc(x)
+
+
+    # Used for explainability (attention maps)
+    def forward_attention(self, x):
+
+        x = self.backbone.forward_features(x)
+
+        x = self.artifact_attention(x)
+
+        B, C, H, W = x.shape
+
+        x = rearrange(x, 'b c h w -> b (h w) c')
+
+        x, attn = self.cross_attn(x, return_attention=True)
+
+        return x, attn
