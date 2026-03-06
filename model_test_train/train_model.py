@@ -1,350 +1,260 @@
 import torch
-from einops import rearrange, repeat
-from torch import nn, einsum
-import torch.nn as nn
-import torch.nn.functional as F
-from random import random, randint, choice
 import numpy as np
-from torch.optim import lr_scheduler
 import os
-import json
-from os import cpu_count
-from multiprocessing.pool import Pool
-from functools import partial
-from multiprocessing import Manager
-from progress.bar import ChargingBar
-import uuid
-from torch.utils.data import DataLoader, TensorDataset, Dataset
-from sklearn.metrics import accuracy_score
 import cv2
-from transforms.albu import IsotropicResize
 import glob
-import pandas as pd
-from tqdm import tqdm
-from utils import get_method, check_correct, resize, shuffle_dataset, get_n_params
-from sklearn.utils.class_weight import compute_class_weight
-from torch.optim.lr_scheduler import LambdaLR
-import collections
-from deepfakes_dataset import DeepFakesDataset
 import math
 import yaml
 import argparse
+import collections
 
+from tqdm import tqdm
+from progress.bar import ChargingBar
+from torch.optim import lr_scheduler
+from torch.utils.data import DataLoader
+from sklearn.utils.class_weight import compute_class_weight
+
+from deepfakes_dataset import DeepFakesDataset
+from utils import check_correct, shuffle_dataset, get_n_params
 
 BASE_DIR = '../deep_fakes_explain/'
 DATA_DIR = os.path.join(BASE_DIR, "dataset")
+
 TRAINING_DIR = os.path.join(DATA_DIR, "training_set")
 VALIDATION_DIR = os.path.join(DATA_DIR, "validation_set")
-TEST_DIR = os.path.join(DATA_DIR, "test_set")
+
 MODELS_PATH = os.path.join(BASE_DIR, "models")
-METADATA_PATH = os.path.join(BASE_DIR, "data/metadata")  # Folder containing all training metadata for DFDC dataset
-VALIDATION_LABELS_PATH = os.path.join(DATA_DIR, "dfdc_val_labels.csv")
 
 
-
-def read_frames(video_path, train_dataset, validation_dataset, config):
-    # Get the video label based on dataset selected
-    method = get_method(video_path, DATA_DIR)
-    if TRAINING_DIR in video_path:
-        if "Original" in video_path:
-            label = 0.
-        elif "DFDC" in video_path:
-            for json_path in glob.glob(os.path.join(METADATA_PATH, "*.json")):
-                with open(json_path, "r") as f:
-                    metadata = json.load(f)
-                video_folder_name = os.path.basename(video_path)
-                video_key = video_folder_name + ".mp4"
-                if video_key in metadata.keys():
-                    item = metadata[video_key]
-                    label = item.get("label", None)
-                    if label == "FAKE":
-                        label = 1.
-                    else:
-                        label = 0.
-                    break
-                else:
-                    label = None
-        else:
-            label = 1.
-        if label == None:
-            print("NOT FOUND", video_path)
-    else:
-        if "Original" in video_path:
-            label = 0.
-        elif "DFDC" in video_path:
-            val_df = pd.DataFrame(pd.read_csv(VALIDATION_LABELS_PATH))
-            video_folder_name = os.path.basename(video_path)
-            video_key = video_folder_name + ".mp4"
-            label = val_df.loc[val_df['filename'] == video_key]['label'].values[0]
-        else:
-            label = 1.
-
-    # Calculate the interval to extract the frames
-    frames_number = len(os.listdir(video_path))
-    if label == 0:
-        min_video_frames = max(int(config['training']['frames-per-video'] * config['training']['rebalancing_real']),
-                               1)  # Compensate unbalancing
-    else:
-        min_video_frames = max(int(config['training']['frames-per-video'] * config['training']['rebalancing_fake']), 1)
-
-    if VALIDATION_DIR in video_path:
-        min_video_frames = int(max(min_video_frames / 8, 2))
-    frames_interval = int(frames_number / min_video_frames)
-    frames_paths = os.listdir(video_path)
-    frames_paths_dict = {}
-
-    # Group the faces with the same index, reduce probabiity to skip some faces in the same video
-    for path in frames_paths:
-        for i in range(0, 1):
-            if "_" + str(i) in path:
-                if i not in frames_paths_dict.keys():
-                    frames_paths_dict[i] = [path]
-                else:
-                    frames_paths_dict[i].append(path)
-
-    # Select only the frames at a certain interval
-    if frames_interval > 0:
-        for key in frames_paths_dict.keys():
-            if len(frames_paths_dict) > frames_interval:
-                frames_paths_dict[key] = frames_paths_dict[key][::frames_interval]
-
-            frames_paths_dict[key] = frames_paths_dict[key][:min_video_frames]
-
-    # Select N frames from the collected ones
-    for key in frames_paths_dict.keys():
-        for index, frame_image in enumerate(frames_paths_dict[key]):
-            # image = transform(np.asarray(cv2.imread(os.path.join(video_path, frame_image))))
-            image = cv2.imread(os.path.join(video_path, frame_image))
-            if image is not None:
-                if TRAINING_DIR in video_path:
-                    train_dataset.append((image, label))
-                else:
-                    validation_dataset.append((image, label))
-
-
-# Main body
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('--num_epochs', default=100, type=int,
-                        help='Number of training epochs.')
-    parser.add_argument('--workers', default=16, type=int,
-                        help='Number of data loader workers.')
-    parser.add_argument('--resume', default='', type=str, metavar='PATH',
-                        help='Path to latest checkpoint (default: none).')
-    parser.add_argument('--dataset', type=str, default='All',
-                        help="Which dataset to use (Deepfakes|Face2Face|FaceShifter|FaceSwap|NeuralTextures|All)")
-    parser.add_argument('--max_videos', type=int, default=-1,
-                        help="Maximum number of videos to use for training (default: all).")
-    parser.add_argument('--config', type=str,
-                        help="Which configuration to use. See into 'config' folder.")
-    parser.add_argument('--efficient_net', type=int, default=0,
-                        help="Which EfficientNet version to use (0 or 7, default: 0)")
-    parser.add_argument('--patience', type=int, default=5,
-                        help="How many epochs wait before stopping for validation loss not improving.")
+
+    parser.add_argument('--num_epochs', default=100, type=int)
+    parser.add_argument('--workers', default=8, type=int)
+    parser.add_argument('--resume', default='', type=str)
+    parser.add_argument('--config', type=str)
+    parser.add_argument('--patience', type=int, default=5)
 
     opt = parser.parse_args()
+
     print(opt)
 
     with open(opt.config, 'r') as ymlfile:
         config = yaml.safe_load(ymlfile)
 
-    if opt.efficient_net == 0:
-        channels = 1280
-    else:
-        channels = 2560
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     from convnext_crossvit import ConvNeXtCrossViT
-    model = ConvNeXtCrossViT()
 
-    model = model.to(device)
+    model = ConvNeXtCrossViT().to(device)
     model.train()
-
-    parallel_net = model
-
-    optimizer = torch.optim.SGD(parallel_net.parameters(), lr=config['training']['lr'],
-                                weight_decay=config['training']['weight-decay'])
-    scheduler = lr_scheduler.StepLR(optimizer, step_size=config['training']['step-size'],
-                                    gamma=config['training']['gamma'])
-    starting_epoch = 0
-    if os.path.exists(opt.resume):
-        model.load_state_dict(torch.load(opt.resume))
-        starting_epoch = int(opt.resume.split("checkpoint")[1].split("_")[
-                                 0]) + 1  # The checkpoint's file name format should be "checkpoint_EPOCH"
-    else:
-        print("No checkpoint loaded.")
 
     print("Model Parameters:", get_n_params(model))
 
-    # READ DATASET
-    if opt.dataset != "All" and opt.dataset != "DFDC":
-        folders = ["Original", opt.dataset]
-    else:
-        folders = ["Original", "Deepfakes", "Face2Face", "FaceShifter", "FaceSwap", "NeuralTextures"] # Fixme: erased DFDC
+    optimizer = torch.optim.SGD(
+        model.parameters(),
+        lr=config['training']['lr'],
+        weight_decay=config['training']['weight-decay']
+    )
 
-    sets = [TRAINING_DIR, VALIDATION_DIR]
+    scheduler = lr_scheduler.StepLR(
+        optimizer,
+        step_size=config['training']['step-size'],
+        gamma=config['training']['gamma']
+    )
 
-    paths = []
-    for dataset in sets:
-        for folder in folders:
-            subfolder = os.path.join(dataset, folder)
-            for index, video_folder_name in enumerate(os.listdir(subfolder)):
-                if index == opt.max_videos:
-                    break
+    print("\nScanning dataset...")
 
-                if os.path.isdir(os.path.join(subfolder, video_folder_name)):
-                    paths.append(os.path.join(subfolder, video_folder_name))
+    train_dataset = []
+    validation_dataset = []
 
-    mgr = Manager()
-    train_dataset = mgr.list()
-    validation_dataset = mgr.list()
+    # ---------- LOAD TRAIN DATA ----------
+    for label, folder in [(0, "real"), (1, "fake")]:
 
-    with Pool(processes=opt.workers) as p:
-        with tqdm(total=len(paths)) as pbar:
-            for v in p.imap_unordered(
-                    partial(read_frames, train_dataset=train_dataset, validation_dataset=validation_dataset, config=config), paths):
-                pbar.update()
+        folder_path = os.path.join(TRAINING_DIR, folder)
 
-    train_samples = len(train_dataset)
+        images = glob.glob(folder_path + "/*.png") + glob.glob(folder_path + "/*.jpg")
+
+        for img_path in images:
+            train_dataset.append((img_path, label))
+
+    # ---------- LOAD VALIDATION DATA ----------
+    for label, folder in [(0, "real"), (1, "fake")]:
+
+        folder_path = os.path.join(VALIDATION_DIR, folder)
+
+        images = glob.glob(folder_path + "/*.png") + glob.glob(folder_path + "/*.jpg")
+
+        for img_path in images:
+            validation_dataset.append((img_path, label))
+
     train_dataset = shuffle_dataset(train_dataset)
-    validation_samples = len(validation_dataset)
     validation_dataset = shuffle_dataset(validation_dataset)
 
-    # Print some useful statistics
-    print("Train images:", len(train_dataset), "Validation images:", len(validation_dataset))
+    train_samples = len(train_dataset)
+    validation_samples = len(validation_dataset)
+
+    print("Train images:", train_samples)
+    print("Validation images:", validation_samples)
+
+    # ---------- CLASS BALANCING ----------
+    train_labels = np.asarray([x[1] for x in train_dataset])
+
+    counter = collections.Counter(train_labels)
+
     print("__TRAINING STATS__")
-    train_counters = collections.Counter(image[1] for image in train_dataset)
-    print(train_counters)
-    if train_counters[1] == 0:
-        class_weights = 1.0
+    print(counter)
+
+    if counter[1] == 0:
+        class_weight = 1.0
     else:
-        class_weights = train_counters[0] / train_counters[1]
-    print("Weights", class_weights)
+        class_weight = counter[0] / counter[1]
 
-    print("__VALIDATION STATS__")
-    val_counters = collections.Counter(image[1] for image in validation_dataset)
-    print(val_counters)
-    print("___________________")
+    print("Weights:", class_weight)
 
-    loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=torch.tensor([class_weights]).to(device))
+    loss_fn = torch.nn.BCEWithLogitsLoss(
+        pos_weight=torch.tensor([class_weight]).to(device)
+    )
 
-    # Create the data loaders
-    validation_labels = np.asarray([row[1] for row in validation_dataset])
-    labels = np.asarray([row[1] for row in train_dataset])
+    # ---------- DATASETS ----------
+    train_images = np.asarray([x[0] for x in train_dataset])
+    train_labels = np.asarray([x[1] for x in train_dataset])
 
-    train_dataset = DeepFakesDataset(np.asarray([row[0] for row in train_dataset]), labels,
-                                     config['model']['image-size'])
-    dl = torch.utils.data.DataLoader(train_dataset, batch_size=config['training']['bs'], shuffle=True, sampler=None,
-                                     batch_sampler=None, num_workers=opt.workers, collate_fn=None,
-                                     pin_memory=False, drop_last=False, timeout=0,
-                                     worker_init_fn=None, prefetch_factor=2,
-                                     persistent_workers=False)
-    del train_dataset
+    val_images = np.asarray([x[0] for x in validation_dataset])
+    val_labels = np.asarray([x[1] for x in validation_dataset])
 
-    validation_dataset = DeepFakesDataset(np.asarray([row[0] for row in validation_dataset]), validation_labels,
-                                          config['model']['image-size'], mode='validation')
-    val_dl = torch.utils.data.DataLoader(validation_dataset, batch_size=config['training']['bs'], shuffle=True,
-                                         sampler=None,
-                                         batch_sampler=None, num_workers=opt.workers, collate_fn=None,
-                                         pin_memory=False, drop_last=False, timeout=0,
-                                         worker_init_fn=None, prefetch_factor=2,
-                                         persistent_workers=False)
-    del validation_dataset
+    train_dataset = DeepFakesDataset(
+        train_images,
+        train_labels,
+        config['model']['image-size']
+    )
 
-    # model = model.cuda()
-    counter = 0
-    not_improved_loss = 0
+    validation_dataset = DeepFakesDataset(
+        val_images,
+        val_labels,
+        config['model']['image-size'],
+        mode='validation'
+    )
+
+    dl = DataLoader(
+        train_dataset,
+        batch_size=config['training']['bs'],
+        shuffle=True,
+        num_workers=opt.workers
+    )
+
+    val_dl = DataLoader(
+        validation_dataset,
+        batch_size=config['training']['bs'],
+        shuffle=False,
+        num_workers=opt.workers
+    )
+
+    print("\nStarting training...\n")
+
     previous_loss = math.inf
-    for t in range(starting_epoch, opt.num_epochs + 1):
+    not_improved_loss = 0
+
+    for epoch in range(opt.num_epochs):
+
         if not_improved_loss == opt.patience:
             break
-        counter = 0
+
+        model.train()
 
         total_loss = 0
-        total_val_loss = 0
-
-        bar = ChargingBar('EPOCH #' + str(t), max=(len(dl) * config['training']['bs']) + len(val_dl))
+        counter = 0
         train_correct = 0
-        positive = 0
-        negative = 0
-        for index, (images, labels) in enumerate(dl):
-            images = np.transpose(images, (0, 3, 1, 2))
-            labels = labels.unsqueeze(1)
 
+        bar = ChargingBar('EPOCH #' + str(epoch + 1), max=len(dl))
+
+        for images, labels in dl:
+
+            images = np.transpose(images, (0,3,1,2))
             images = images.to(device)
-            labels = labels.to(device)
-            y_pred = parallel_net(images)
-            loss = loss_fn(y_pred, labels)
-            corrects, positive_class, negative_class = check_correct(y_pred.detach().cpu(), labels.detach().cpu())
-            #corrects, positive_class, negative_class = check_correct(y_pred, labels)
-            train_correct += corrects
-            positive += positive_class
-            negative += negative_class
+
+            labels = labels.unsqueeze(1).float().to(device)
+
+            preds = model(images)
+
+            loss = loss_fn(preds, labels)
+
             optimizer.zero_grad()
-
-            # loss.backward()
             loss.backward()
-
             optimizer.step()
-            counter += 1
-            total_loss += round(loss.item(), 2)
 
-            if index % 1200 == 0:  # Intermediate metrics print
-                print("\nLoss:", total_loss / counter, "| Accuracy:",
-                      train_correct / (counter * config['training']['bs']), "| Train reals:", negative, "| Train fakes:",
-                      positive)
-
-            for i in range(config['training']['bs']):
-                bar.next()
-
-        val_correct = 0
-        val_positive = 0
-        val_negative = 0
-        val_counter = 0
-        train_correct /= train_samples
-        total_loss /= counter
-        for index, (val_images, val_labels) in enumerate(val_dl):
-            val_images = np.transpose(val_images, (0, 3, 1, 2))
-
-            val_images = val_images.to(device)
-            val_labels = val_labels.unsqueeze(1).to(device)
-
-            val_pred = parallel_net(val_images)
-            val_loss = loss_fn(val_pred, val_labels)
-
-            corrects, positive_class, negative_class = check_correct(
-                val_pred.detach().cpu(),
-                val_labels.detach().cpu()
+            corrects, _, _ = check_correct(
+                preds.detach().cpu(),
+                labels.detach().cpu()
             )
-            total_val_loss += round(val_loss.item(), 2)
-            val_correct += corrects
-            val_positive += positive_class
-            val_counter += 1
-            val_negative += negative_class
+
+            train_correct += corrects
+            total_loss += loss.item()
+            counter += 1
+
             bar.next()
 
-        scheduler.step()
         bar.finish()
 
-        total_val_loss /= val_counter
-        val_correct /= validation_samples
-        if previous_loss <= total_val_loss:
-            print("Validation loss did not improved")
+        train_accuracy = train_correct / train_samples
+        total_loss /= counter
+
+        # ---------- VALIDATION ----------
+        model.eval()
+
+        val_loss = 0
+        val_correct = 0
+        val_counter = 0
+
+        with torch.no_grad():
+
+            for images, labels in val_dl:
+
+                images = np.transpose(images,(0,3,1,2))
+                images = images.to(device)
+
+                labels = labels.unsqueeze(1).float().to(device)
+
+                preds = model(images)
+
+                loss = loss_fn(preds, labels)
+
+                corrects, _, _ = check_correct(
+                    preds.cpu(),
+                    labels.cpu()
+                )
+
+                val_correct += corrects
+                val_loss += loss.item()
+                val_counter += 1
+
+        val_loss /= val_counter
+        val_accuracy = val_correct / validation_samples
+
+        scheduler.step()
+
+        print(
+            f"\nEpoch {epoch+1}/{opt.num_epochs} "
+            f"loss:{total_loss:.4f} "
+            f"acc:{train_accuracy:.4f} "
+            f"val_loss:{val_loss:.4f} "
+            f"val_acc:{val_accuracy:.4f}"
+        )
+
+        if val_loss >= previous_loss:
             not_improved_loss += 1
         else:
             not_improved_loss = 0
 
-        previous_loss = total_val_loss
-        print("#" + str(t) + "/" + str(opt.num_epochs) + " loss:" +
-              str(total_loss) + " accuracy:" + str(train_correct) + " val_loss:" + str(
-            total_val_loss) + " val_accuracy:" + str(val_correct) + " val_0s:" + str(val_negative) + "/" + str(
-            np.count_nonzero(validation_labels == 0)) + " val_1s:" + str(val_positive) + "/" + str(
-            np.count_nonzero(validation_labels == 1)))
+        previous_loss = val_loss
 
-        if not os.path.exists(MODELS_PATH):
-            os.makedirs(MODELS_PATH)
-        torch.save(model.state_dict(), os.path.join(MODELS_PATH,
-                                                    "efficientnetB" + str(opt.efficient_net) + "_checkpoint" + str(
-                                                        t) + "_" + opt.dataset + "_emb_size_392"))
+        os.makedirs(MODELS_PATH, exist_ok=True)
+
+        torch.save(
+            model.state_dict(),
+            os.path.join(
+                MODELS_PATH,
+                f"convnext_crossvit_epoch{epoch+1}.pth"
+            )
+        )
