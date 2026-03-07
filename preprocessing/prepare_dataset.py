@@ -1,52 +1,65 @@
 import os
+import uuid
 import random
 import shutil
+from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
 
-# ===== PATHS =====
+# ================================
+# PATHS
+# ================================
 
-SOURCE_DATASET = r"C:\Users\Pranesh\Downloads\faceforensics_dataset"
+SOURCE_DATASET = r"D:\dataset"
 
-DEST_DATASET = r"C:\Users\Pranesh\Desktop\paper\deepfake_convnextvit\deep_fakes_explain\dataset"
+DEST_DATASET = r"C:\Users\HP\Desktop\paper\deepfake_convnextvit2\deep_fakes_explain\dataset"
 
-# ===== SPLIT RATIO =====
 
-TRAIN_RATIO = 0.7
-VAL_RATIO = 0.15
-TEST_RATIO = 0.15
+# ================================
+# SPLIT RATIO
+# ================================
 
-# ===== COLLECT IMAGES =====
+TRAIN_RATIO = 0.8
+VAL_RATIO = 0.1
+TEST_RATIO = 0.1
 
-real_images = []
-fake_images = []
+
+# ================================
+# IMAGE COLLECTION
+# ================================
+
+def collect_images(path):
+
+    images = []
+
+    for root, dirs, files in os.walk(path):
+        for f in files:
+            if f.lower().endswith((".jpg", ".jpeg", ".png")):
+                images.append(os.path.join(root, f))
+
+    return images
+
 
 print("Scanning REAL images...")
-
-real_path = os.path.join(SOURCE_DATASET, "real")
-
-for root, dirs, files in os.walk(real_path):
-    for f in files:
-        if f.lower().endswith((".jpg", ".png", ".jpeg")):
-            real_images.append(os.path.join(root, f))
+real_images = collect_images(os.path.join(SOURCE_DATASET, "real"))
 
 print("Scanning FAKE images...")
-
-fake_path = os.path.join(SOURCE_DATASET, "fake")
-
-for root, dirs, files in os.walk(fake_path):
-    for f in files:
-        if f.lower().endswith((".jpg", ".png", ".jpeg")):
-            fake_images.append(os.path.join(root, f))
+fake_images = collect_images(os.path.join(SOURCE_DATASET, "fake"))
 
 print(f"REAL images found: {len(real_images)}")
 print(f"FAKE images found: {len(fake_images)}")
 
-# ===== SHUFFLE =====
+
+# ================================
+# SHUFFLE DATA
+# ================================
 
 random.shuffle(real_images)
 random.shuffle(fake_images)
 
-# ===== SPLIT FUNCTION =====
+
+# ================================
+# SPLIT FUNCTION
+# ================================
 
 def split_data(images):
 
@@ -63,37 +76,62 @@ def split_data(images):
 real_train, real_val, real_test = split_data(real_images)
 fake_train, fake_val, fake_test = split_data(fake_images)
 
-# ===== COPY FUNCTION =====
 
-def copy_images(image_list, destination):
+# ================================
+# PARALLEL COPY FUNCTION
+# ================================
+
+def copy_worker(args):
+
+    src, dst = args
+
+    filename = f"{uuid.uuid4()}_{os.path.basename(src)}"
+    dst_path = os.path.join(dst, filename)
+
+    try:
+        shutil.copy(src, dst_path)
+    except Exception:
+        pass
+
+
+def copy_images_parallel(image_list, destination):
 
     os.makedirs(destination, exist_ok=True)
 
-    for img in tqdm(image_list):
-        filename = os.path.basename(img)
-        shutil.copy2(img, os.path.join(destination, filename))
+    tasks = [(img, destination) for img in image_list]
+
+    workers = max(cpu_count() - 1, 1)
+
+    with Pool(workers) as pool:
+        list(tqdm(pool.imap(copy_worker, tasks), total=len(tasks)))
 
 
-# ===== COPY REAL =====
+# ================================
+# COPY REAL
+# ================================
 
 print("\nCopying REAL training images...")
-copy_images(real_train, os.path.join(DEST_DATASET, "training_set", "real"))
+copy_images_parallel(real_train, os.path.join(DEST_DATASET, "training_set", "real"))
 
 print("\nCopying REAL validation images...")
-copy_images(real_val, os.path.join(DEST_DATASET, "validation_set", "real"))
+copy_images_parallel(real_val, os.path.join(DEST_DATASET, "validation_set", "real"))
 
 print("\nCopying REAL test images...")
-copy_images(real_test, os.path.join(DEST_DATASET, "test_set", "real"))
+copy_images_parallel(real_test, os.path.join(DEST_DATASET, "test_set", "real"))
 
-# ===== COPY FAKE =====
+
+# ================================
+# COPY FAKE
+# ================================
 
 print("\nCopying FAKE training images...")
-copy_images(fake_train, os.path.join(DEST_DATASET, "training_set", "fake"))
+copy_images_parallel(fake_train, os.path.join(DEST_DATASET, "training_set", "fake"))
 
 print("\nCopying FAKE validation images...")
-copy_images(fake_val, os.path.join(DEST_DATASET, "validation_set", "fake"))
+copy_images_parallel(fake_val, os.path.join(DEST_DATASET, "validation_set", "fake"))
 
 print("\nCopying FAKE test images...")
-copy_images(fake_test, os.path.join(DEST_DATASET, "test_set", "fake"))
+copy_images_parallel(fake_test, os.path.join(DEST_DATASET, "test_set", "fake"))
+
 
 print("\nDONE — Dataset prepared successfully.")
