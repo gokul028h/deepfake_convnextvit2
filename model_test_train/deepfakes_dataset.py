@@ -8,6 +8,7 @@ from albumentations import Compose, RandomBrightnessContrast, \
     ShiftScaleRotate, ImageCompression, PadIfNeeded, GaussNoise
 
 from transforms.albu import IsotropicResize
+from PIL import Image, ImageChops
 
 
 class DeepFakesDataset(Dataset):
@@ -18,9 +19,9 @@ class DeepFakesDataset(Dataset):
         self.y = torch.from_numpy(labels)
         self.image_size = image_size
         self.mode = mode
-        self.n_samples = images.shape[0]
+        self.n_samples = len(images)
 
-        # Create transforms once (faster)
+        # create transforms once
         if mode == "train":
             self.transform = self.create_train_transforms(image_size)
         else:
@@ -82,10 +83,9 @@ class DeepFakesDataset(Dataset):
 
         image_path = self.x[index]
 
-        # Read image properly
         image = cv2.imread(image_path)
 
-        # Handle corrupted images
+        # handle corrupted images
         if image is None:
             image = np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
 
@@ -93,9 +93,42 @@ class DeepFakesDataset(Dataset):
 
         image = self.transform(image=image)['image']
 
-        image = image.transpose(2, 0, 1)
 
-        return torch.from_numpy(image).float(), self.y[index]
+        # ===== DIP FEATURES =====
+
+        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+
+        # Edge map
+        edge = cv2.Canny(gray, 100, 200)
+
+        # FFT spectrum
+        f = np.fft.fft2(gray)
+        fshift = np.fft.fftshift(f)
+        fft_map = np.log(np.abs(fshift) + 1)
+        fft_map = cv2.normalize(fft_map, None, 0, 255, cv2.NORM_MINMAX)
+
+        # Error Level Analysis
+        pil_img = Image.fromarray(image)
+        temp_path = "temp.jpg"
+        pil_img.save(temp_path, "JPEG", quality=90)
+        compressed = Image.open(temp_path)
+        ela = ImageChops.difference(pil_img, compressed)
+        ela = np.array(ela.convert("L"))
+
+        # resize maps
+        edge = cv2.resize(edge, (self.image_size, self.image_size))
+        fft_map = cv2.resize(fft_map, (self.image_size, self.image_size))
+        ela = cv2.resize(ela, (self.image_size, self.image_size))
+
+        # convert RGB
+        rgb = image.transpose(2, 0, 1)
+
+        # stack DIP maps
+        dip_maps = np.stack([edge, fft_map, ela])
+
+        combined = np.concatenate([rgb, dip_maps], axis=0)
+
+        return torch.tensor(combined).float(), self.y[index]
 
 
     def __len__(self):

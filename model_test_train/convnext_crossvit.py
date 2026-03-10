@@ -86,6 +86,7 @@ class ConvNeXtCrossViT(nn.Module):
             num_classes=0,
             global_pool=''
         )
+        self.backbone.stem[0] = torch.nn.Conv2d(6,96,kernel_size=4, stride=4,padding=0)  # Adjust first conv layer for 6-channel input
 
         self.artifact_attention = ArtifactAttention(768)
 
