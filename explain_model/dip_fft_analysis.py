@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 
-IMAGE_PATH = "examples/real.jpg"   # change if needed
+IMAGE_PATH = "examples/fake.jpg"   # change if needed
 
 
 def show_fft_spectrum(image_path):

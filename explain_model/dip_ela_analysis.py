@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from PIL import Image, ImageChops, ImageEnhance
 import os
 
-IMAGE_PATH = "examples/fake.jpg"   # change if needed
+IMAGE_PATH = "examples/real_1.jpg"   # change if needed
 
 
 def perform_ela(image_path, quality=90):
