@@ -68,19 +68,16 @@ def get_n_params(model):
     return pp
     
 def check_correct(preds, labels):
-    preds = preds.cpu()
-    labels = labels.cpu()
-    preds = [np.asarray(torch.sigmoid(pred).detach().numpy()).round() for pred in preds]
 
-    correct = 0
-    positive_class = 0
-    negative_class = 0
-    for i in range(len(labels)):
-        pred = int(preds[i])
-        if labels[i] == pred:
-            correct += 1
-        if pred == 1:
-            positive_class += 1
-        else:
-            negative_class += 1
+    preds = preds.float().cpu()
+    labels = labels.cpu()
+
+    probs = torch.sigmoid(preds)
+    preds = (probs > 0.5).int()
+
+    correct = (preds == labels).sum().item()
+
+    positive_class = (preds == 1).sum().item()
+    negative_class = (preds == 0).sum().item()
+
     return correct, positive_class, negative_class

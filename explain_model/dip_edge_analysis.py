@@ -1,7 +1,7 @@
 import cv2
 import matplotlib.pyplot as plt
 
-IMAGE_PATH = "examples/fake.jpg"   # change image if needed
+IMAGE_PATH = "examples/real_1.jpg"   # change image if needed
 
 
 def show_edge_map(image_path):

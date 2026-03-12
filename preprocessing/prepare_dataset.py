@@ -7,9 +7,9 @@ from tqdm import tqdm
 
 # ===== PATHS =====
 
-SOURCE_DATASET = r"D:\dataset"
+SOURCE_DATASET = r"C:\Users\Pranesh\Downloads\dataset"
 
-DEST_DATASET = r"C:\Users\HP\Desktop\paper\deepfake_convnextvit2\deep_fakes_explain\dataset"
+DEST_DATASET = r"C:\Users\Pranesh\Desktop\paper\deepfake_convnextvit2\deep_fakes_explain\dataset"
 
 
 # ===== SPLIT RATIO =====

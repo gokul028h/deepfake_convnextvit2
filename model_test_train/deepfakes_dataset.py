@@ -5,11 +5,9 @@ import numpy as np
 
 from albumentations import Compose, RandomBrightnessContrast, \
     HorizontalFlip, FancyPCA, HueSaturationValue, ToGray, \
-    ShiftScaleRotate, ImageCompression, PadIfNeeded, GaussNoise
+    Affine, ImageCompression, PadIfNeeded, GaussNoise
 
 from transforms.albu import IsotropicResize
-from PIL import Image, ImageChops
-
 
 class DeepFakesDataset(Dataset):
 
@@ -49,15 +47,14 @@ class DeepFakesDataset(Dataset):
 
             RandomBrightnessContrast(p=0.3),
             HueSaturationValue(p=0.3),
-            FancyPCA(p=0.2),
+            FancyPCA(p=0.05),
             ToGray(p=0.2),
 
-            ShiftScaleRotate(
-                shift_limit=0.1,
-                scale_limit=0.2,
-                rotate_limit=5,
-                border_mode=cv2.BORDER_CONSTANT,
-                p=0.5
+            Affine(
+                translate_percent={"x": (-0.1, 0.1), "y": (-0.1, 0.1)},
+                scale=(0.8, 1.2),
+                rotate=(-5, 5),
+                p=0.2
             ),
         ])
 
@@ -85,51 +82,24 @@ class DeepFakesDataset(Dataset):
 
         image = cv2.imread(image_path)
 
-        # handle corrupted images
         if image is None:
             image = np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
+        else:
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-
+        # Apply augmentation
         image = self.transform(image=image)['image']
 
+        # Normalize RGB (ImageNet stats)
+        image = image.astype(np.float32) / 255.0
 
-        # ===== DIP FEATURES =====
+        mean = np.array([0.485, 0.456, 0.406])
+        std = np.array([0.229, 0.224, 0.225])
 
-        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        image = (image - mean) / std
+        image = image.transpose(2, 0, 1)  # HWC -> CHW
 
-        # Edge map
-        edge = cv2.Canny(gray, 100, 200)
-
-        # FFT spectrum
-        f = np.fft.fft2(gray)
-        fshift = np.fft.fftshift(f)
-        fft_map = np.log(np.abs(fshift) + 1)
-        fft_map = cv2.normalize(fft_map, None, 0, 255, cv2.NORM_MINMAX)
-
-        # Error Level Analysis
-        pil_img = Image.fromarray(image)
-        temp_path = "temp.jpg"
-        pil_img.save(temp_path, "JPEG", quality=90)
-        compressed = Image.open(temp_path)
-        ela = ImageChops.difference(pil_img, compressed)
-        ela = np.array(ela.convert("L"))
-
-        # resize maps
-        edge = cv2.resize(edge, (self.image_size, self.image_size))
-        fft_map = cv2.resize(fft_map, (self.image_size, self.image_size))
-        ela = cv2.resize(ela, (self.image_size, self.image_size))
-
-        # convert RGB
-        rgb = image.transpose(2, 0, 1)
-
-        # stack DIP maps
-        dip_maps = np.stack([edge, fft_map, ela])
-
-        combined = np.concatenate([rgb, dip_maps], axis=0)
-
-        return torch.tensor(combined).float(), self.y[index]
-
+        return torch.tensor(image).float(), self.y[index]
 
     def __len__(self):
         return self.n_samples

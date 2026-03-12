@@ -7,25 +7,18 @@ from einops import rearrange
 class ArtifactAttention(nn.Module):
 
     def __init__(self, channels):
-
         super().__init__()
 
         self.conv1 = nn.Conv2d(channels, channels // 8, kernel_size=1)
-
         self.relu = nn.ReLU(inplace=True)
-
         self.conv2 = nn.Conv2d(channels // 8, 1, kernel_size=1)
-
         self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
 
         attn = self.conv1(x)
-
         attn = self.relu(attn)
-
         attn = self.conv2(attn)
-
         attn = self.sigmoid(attn)
 
         return x * attn
@@ -34,7 +27,6 @@ class ArtifactAttention(nn.Module):
 class CrossAttention(nn.Module):
 
     def __init__(self, dim=768, heads=8):
-
         super().__init__()
 
         self.heads = heads
@@ -45,6 +37,8 @@ class CrossAttention(nn.Module):
         self.to_v = nn.Linear(dim, dim)
 
         self.to_out = nn.Linear(dim, dim)
+
+        self.attn_drop = nn.Dropout(0.1)
 
     def forward(self, x, return_attention=False):
 
@@ -61,11 +55,11 @@ class CrossAttention(nn.Module):
         dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
 
         attn = dots.softmax(dim=-1)
+        attn = self.attn_drop(attn)
 
         out = torch.matmul(attn, v)
 
         out = rearrange(out, 'b h n d -> b n (h d)')
-
         out = self.to_out(out)
 
         if return_attention:
@@ -81,21 +75,26 @@ class ConvNeXtCrossViT(nn.Module):
         super().__init__()
 
         self.backbone = timm.create_model(
-            'convnext_tiny',
+            "convnext_tiny",
             pretrained=True,
             num_classes=0,
-            global_pool=''
+            global_pool=""
         )
-        self.backbone.stem[0] = torch.nn.Conv2d(6,96,kernel_size=4, stride=4,padding=0)  # Adjust first conv layer for 6-channel input
 
-        self.artifact_attention = ArtifactAttention(768)
+        # Use pretrained 3-channel stem as-is (full ImageNet transfer learning)
 
-        self.cross_attn = CrossAttention(dim=768)
+        channels = self.backbone.num_features
+
+        self.artifact_attention = ArtifactAttention(channels)
+
+        self.cross_attn = CrossAttention(dim=channels)
 
         self.pool = nn.AdaptiveAvgPool1d(1)
 
-        self.fc = nn.Linear(768, 1)
-
+        self.fc = nn.Sequential(
+            nn.LayerNorm(channels),
+            nn.Linear(channels, 1)
+        )
 
     def forward(self, x):
 
@@ -105,7 +104,7 @@ class ConvNeXtCrossViT(nn.Module):
 
         B, C, H, W = x.shape
 
-        x = rearrange(x, 'b c h w -> b (h w) c')
+        x = rearrange(x, "b c h w -> b (h w) c")
 
         x = self.cross_attn(x)
 
@@ -116,7 +115,6 @@ class ConvNeXtCrossViT(nn.Module):
         return self.fc(x)
 
 
-    # Used for explainability (attention maps)
     def forward_attention(self, x):
 
         x = self.backbone.forward_features(x)
@@ -125,7 +123,7 @@ class ConvNeXtCrossViT(nn.Module):
 
         B, C, H, W = x.shape
 
-        x = rearrange(x, 'b c h w -> b (h w) c')
+        x = rearrange(x, "b c h w -> b (h w) c")
 
         x, attn = self.cross_attn(x, return_attention=True)
 

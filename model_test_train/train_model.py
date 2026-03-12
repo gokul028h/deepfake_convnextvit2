@@ -1,19 +1,23 @@
 import torch
 import numpy as np
 import os
-import glob
 import math
 import yaml
 import argparse
 import collections
+import time
 
-from deepfakes_dataset import DeepFakesDataset
-from progress.bar import ChargingBar
-from torch.optim import lr_scheduler
+
+from torch.utils.data import WeightedRandomSampler
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from torch.optim import lr_scheduler
 from sklearn.metrics import precision_score, recall_score, f1_score
+from tqdm import tqdm
 
+from torch.amp import autocast, GradScaler
+
+from deepfakes_dataset import DeepFakesDataset
 from utils import check_correct, shuffle_dataset, get_n_params
 
 
@@ -46,31 +50,55 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    from convnext_crossvit import ConvNeXtCrossViT
+    torch.backends.cudnn.benchmark = True
 
+    from convnext_crossvit import ConvNeXtCrossViT
     model = ConvNeXtCrossViT().to(device)
 
     print("Model Parameters:", get_n_params(model))
 
-    optimizer = torch.optim.SGD(
+    optimizer = torch.optim.AdamW(
         model.parameters(),
-        lr=config['training']['lr'],
-        weight_decay=config['training']['weight-decay']
+        lr=float(config['training']['lr']),
+        weight_decay=float(config['training']['weight-decay'])
     )
 
-    scheduler = lr_scheduler.StepLR(
+    scheduler = lr_scheduler.CosineAnnealingLR(
         optimizer,
-        step_size=config['training']['step-size'],
-        gamma=config['training']['gamma']
+        T_max=config['training'].get('T_max', opt.num_epochs),
+        eta_min=config['training'].get('eta_min', 1e-6)
     )
 
     writer = SummaryWriter(LOG_DIR)
 
+    scaler = GradScaler(enabled=True)
+
+    start_epoch = 0
+    best_val_acc = 0
+    not_improved_loss = 0
+    previous_loss = math.inf
+
+    auto_resume_path = os.path.join(MODELS_PATH, "last_checkpoint.pth")
+    if opt.resume == '' and os.path.exists(auto_resume_path):
+        print(f"Auto-resume found checkpoint at {auto_resume_path}")
+        opt.resume = auto_resume_path
+
     if opt.resume != '':
-        checkpoint = torch.load(opt.resume, map_location=device)
-        model.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        print("Checkpoint loaded.")
+        if os.path.exists(opt.resume):
+            checkpoint = torch.load(opt.resume, map_location=device)
+            model.load_state_dict(checkpoint['model'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            if 'epoch' in checkpoint:
+                start_epoch = checkpoint['epoch'] + 1
+            if 'best_val_acc' in checkpoint:
+                best_val_acc = checkpoint['best_val_acc']
+            if 'scheduler' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler'])
+            if 'scaler' in checkpoint:
+                scaler.load_state_dict(checkpoint['scaler'])
+            print(f"Checkpoint loaded. Resuming from epoch {start_epoch}")
+        else:
+            print(f"Resume path {opt.resume} does not exist.")
 
     print("\nScanning dataset...\n")
 
@@ -79,20 +107,17 @@ if __name__ == "__main__":
 
     for label, folder in [(0, "real"), (1, "fake")]:
         folder_path = os.path.join(TRAINING_DIR, folder)
-
         for root, dirs, files in os.walk(folder_path):
             for f in files:
-                if f.lower().endswith((".jpg",".jpeg",".png")):
-                    train_dataset.append((os.path.join(root,f),label))
+                if f.lower().endswith((".jpg", ".jpeg", ".png")):
+                    train_dataset.append((os.path.join(root, f), label))
 
     for label, folder in [(0, "real"), (1, "fake")]:
         folder_path = os.path.join(VALIDATION_DIR, folder)
-
         for root, dirs, files in os.walk(folder_path):
             for f in files:
-                if f.lower().endswith((".jpg",".jpeg",".png")):
-                    validation_dataset.append((os.path.join(root,f),label))
-
+                if f.lower().endswith((".jpg", ".jpeg", ".png")):
+                    validation_dataset.append((os.path.join(root, f), label))
 
     train_dataset = shuffle_dataset(train_dataset)
     validation_dataset = shuffle_dataset(validation_dataset)
@@ -121,16 +146,27 @@ if __name__ == "__main__":
     else:
         class_weight = counter[0] / counter[1]
 
-    print("Weights:", class_weight)
+    print("Calculated pos_weight (for logging):", class_weight)
 
-    loss_fn = torch.nn.BCEWithLogitsLoss(
-        pos_weight=torch.tensor([class_weight]).to(device)
-    )
+    # Removed pos_weight here because WeightedRandomSampler is natively oversampling 
+    # the rare class. Doing both causes the model to guess Real for 100% of images.
+    loss_fn = torch.nn.BCEWithLogitsLoss()
 
     train_dataset = DeepFakesDataset(
         train_images,
         train_labels,
         config['model']['image-size']
+    )
+
+    # Balanced sampling
+    class_counts = np.bincount(train_labels)
+    class_weights = 1. / class_counts
+    sample_weights = torch.from_numpy(class_weights[train_labels]).float()
+
+    sampler = WeightedRandomSampler(
+        weights=sample_weights,
+        num_samples=len(sample_weights),
+        replacement=True
     )
 
     validation_dataset = DeepFakesDataset(
@@ -142,25 +178,32 @@ if __name__ == "__main__":
 
     dl = DataLoader(
         train_dataset,
-        batch_size=config['training']['bs'],
-        shuffle=True,
-        num_workers=opt.workers
+        batch_size=int(config['training']['bs']),
+        sampler=sampler,
+        num_workers=opt.workers,
+        pin_memory=True,
+        persistent_workers=(opt.workers > 0),
+        prefetch_factor=4 if opt.workers > 0 else None
     )
 
     val_dl = DataLoader(
         validation_dataset,
-        batch_size=config['training']['bs'],
+        batch_size=int(config['training']['bs']),
         shuffle=False,
-        num_workers=opt.workers
+        num_workers=opt.workers,
+        pin_memory=True,
+        persistent_workers=(opt.workers > 0),
+        prefetch_factor=4 if opt.workers > 0 else None
     )
 
+    accumulation_steps = config['training'].get('accumulation_steps', 2)
+
     print("\nStarting training...\n")
+    print(f"Gradient accumulation steps: {accumulation_steps} (effective batch size: {int(config['training']['bs']) * accumulation_steps})")
 
-    previous_loss = math.inf
-    not_improved_loss = 0
-    best_val_acc = 0
+    for epoch in range(start_epoch, opt.num_epochs):
 
-    for epoch in range(opt.num_epochs):
+        epoch_start_time = time.time()
 
         if not_improved_loss == opt.patience:
             print("Early stopping triggered.")
@@ -171,37 +214,43 @@ if __name__ == "__main__":
         total_loss = 0
         counter_batches = 0
         train_correct = 0
+        train_seen = 0
 
-        bar = ChargingBar('EPOCH #' + str(epoch + 1), max=len(dl))
+        optimizer.zero_grad()
 
-        for images, labels in dl:
+        pbar = tqdm(dl, desc=f"Epoch {epoch+1}/{opt.num_epochs}")
 
-            images = images.to(device)
+        for batch_idx, (images, labels) in enumerate(pbar):
 
-            labels = labels.unsqueeze(1).float().to(device)
+            images = images.to(device, non_blocking=True)
+            labels = labels.unsqueeze(1).float().to(device, non_blocking=True)
 
-            preds = model(images)
+            with autocast(device_type="cuda", dtype=torch.bfloat16):
+                preds = model(images)
+                loss = loss_fn(preds, labels) / accumulation_steps
 
-            loss = loss_fn(preds, labels)
+            scaler.scale(loss).backward()
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(dl):
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
-            corrects, pred_labels, true_labels = check_correct(
+            corrects, _, _ = check_correct(
                 preds.detach().cpu(),
                 labels.detach().cpu()
             )
 
+            batch_size = images.size(0)
+
             train_correct += corrects
-            total_loss += loss.item()
+            train_seen += batch_size
+            total_loss += loss.item() * accumulation_steps
             counter_batches += 1
 
-            bar.next()
+            pbar.set_postfix(loss=loss.item() * accumulation_steps)
 
-        bar.finish()
-
-        train_accuracy = train_correct / train_samples
+        train_accuracy = train_correct / train_seen
         total_loss /= counter_batches
 
         model.eval()
@@ -215,30 +264,32 @@ if __name__ == "__main__":
 
         with torch.no_grad():
 
-            for images, labels in val_dl:
+            for images, labels in tqdm(val_dl, desc="Validation", leave=False):
 
-                images = images.to(device)
-                labels = labels.unsqueeze(1).float().to(device)
-                preds = model(images)
-                loss = loss_fn(preds, labels)
-                corrects, pred_labels, true_labels = check_correct(
-                    preds.cpu(),
-                    labels.cpu()
-                )
+                images = images.to(device, non_blocking=True)
+                labels = labels.unsqueeze(1).float().to(device, non_blocking=True)
 
-                all_preds.extend(pred_labels)
-                all_labels.extend(true_labels)
+                with autocast(device_type="cuda", dtype=torch.bfloat16):
+                    preds = model(images)
+                    loss = loss_fn(preds, labels)
 
-                val_correct += corrects
+                probs = torch.sigmoid(preds)
+                pred_labels = (probs > 0.5).int()
+
+                all_preds.extend(pred_labels.cpu().numpy().flatten())
+                all_labels.extend(labels.cpu().numpy().flatten())
+
+                val_correct += (pred_labels == labels).sum().item()
+
                 val_loss += loss.item()
                 val_counter += 1
 
         val_loss /= val_counter
-        val_accuracy = val_correct / validation_samples
+        val_accuracy = val_correct / len(all_labels)
 
-        precision = precision_score(all_labels, all_preds)
-        recall = recall_score(all_labels, all_preds)
-        f1 = f1_score(all_labels, all_preds)
+        precision = precision_score(all_labels, all_preds, zero_division=0)
+        recall = recall_score(all_labels, all_preds, zero_division=0)
+        f1 = f1_score(all_labels, all_preds, zero_division=0)
 
         scheduler.step()
 
@@ -248,29 +299,43 @@ if __name__ == "__main__":
         writer.add_scalar("Accuracy/validation", val_accuracy, epoch)
         writer.add_scalar("F1", f1, epoch)
 
+        epoch_time = time.time() - epoch_start_time
+        remaining_epochs = opt.num_epochs - (epoch + 1)
+
+        eta_minutes = (epoch_time * remaining_epochs) / 60
+        epoch_minutes = epoch_time / 60
+
         print(
             f"\nEpoch {epoch+1}/{opt.num_epochs} "
-            f"loss:{total_loss:.4f} "
-            f"acc:{train_accuracy:.4f} "
-            f"val_loss:{val_loss:.4f} "
-            f"val_acc:{val_accuracy:.4f} "
-            f"precision:{precision:.4f} "
-            f"recall:{recall:.4f} "
-            f"f1:{f1:.4f}"
+            f"| epoch_time: {epoch_minutes:.2f} min "
+            f"| ETA: {eta_minutes:.2f} min "
+            f"| loss:{total_loss:.4f} "
+            f"| acc:{train_accuracy:.4f} "
+            f"| val_loss:{val_loss:.4f} "
+            f"| val_acc:{val_accuracy:.4f} "
+            f"| precision:{precision:.4f} "
+            f"| recall:{recall:.4f} "
+            f"| f1:{f1:.4f}"
         )
+
+        os.makedirs(MODELS_PATH, exist_ok=True)
+        
+        checkpoint_dict = {
+            'model': model.state_dict(),
+            'optimizer': optimizer.state_dict(),
+            'epoch': epoch,
+            'best_val_acc': best_val_acc,
+            'scheduler': scheduler.state_dict(),
+            'scaler': scaler.state_dict()
+        }
 
         if val_accuracy > best_val_acc:
 
             best_val_acc = val_accuracy
-
-            os.makedirs(MODELS_PATH, exist_ok=True)
+            checkpoint_dict['best_val_acc'] = best_val_acc
 
             torch.save(
-                {
-                    'model': model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'epoch': epoch
-                },
+                checkpoint_dict,
                 os.path.join(MODELS_PATH, "best_model.pth")
             )
 
@@ -280,3 +345,6 @@ if __name__ == "__main__":
             not_improved_loss = 0
 
         previous_loss = val_loss
+
+        torch.save(checkpoint_dict, os.path.join(MODELS_PATH, f"checkpoint_epoch_{epoch+1}.pth"))
+        torch.save(checkpoint_dict, os.path.join(MODELS_PATH, "last_checkpoint.pth"))
