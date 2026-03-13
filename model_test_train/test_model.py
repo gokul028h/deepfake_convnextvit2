@@ -1,235 +1,183 @@
+import torch
+import cv2
+import numpy as np
+import yaml
+import argparse
 import os
 import sys
-import cv2
-import yaml
-import torch
-import argparse
-import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
-import torch.nn as nn
-import csv
-
 from sklearn import metrics
-from sklearn.metrics import auc, accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from tqdm import tqdm
-from progress.bar import Bar
-from multiprocessing.pool import Pool
-from multiprocessing import Manager
-from functools import partial
-from shutil import copyfile
-
-import ttach as tta
-
-# allow importing model files
-sys.path.append(os.path.abspath("."))
-
-from evit_model10 import EfficientViT
-from transforms.albu import IsotropicResize
-from utils import get_method, custom_round, custom_video_round
-
+from convnext_crossvit import ConvNeXtCrossViT
 from albumentations import Compose, PadIfNeeded
+from transforms.albu import IsotropicResize
 
-RESULTS_DIR = "results"
-BASE_DIR = "../deep_fakes_explain"
-DATA_DIR = os.path.join(BASE_DIR, "dataset")
-TEST_DIR = os.path.join(DATA_DIR, "validation_set")
-OUTPUT_DIR = os.path.join(RESULTS_DIR, "tests")
+# forensic signal computation
+def compute_dip_features(image_rgb):
+    gray = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2GRAY)
+    h, w = gray.shape
 
-TEST_LABELS_PATH = os.path.join(BASE_DIR, "dataset/dfdc_test_labels.csv")
+    # 1. FUSED EDGE DETECTION
+    canny = cv2.Canny(gray, 100, 200).astype(np.float32) / 255.0
+    laplacian = cv2.Laplacian(gray, cv2.CV_64F)
+    laplacian = cv2.convertScaleAbs(laplacian).astype(np.float32) / 255.0
+    sobel_x = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=3)
+    sobel_mag = np.sqrt(sobel_x ** 2 + sobel_y ** 2)
+    sobel_mag = np.clip(sobel_mag / (sobel_mag.max() + 1e-8), 0, 1).astype(np.float32)
+    edge_fused = (0.4 * canny + 0.3 * laplacian + 0.3 * sobel_mag).astype(np.float32)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # 2. HIGH-PASS EMPHASIZED FFT
+    f = np.fft.fft2(gray)
+    fshift = np.fft.fftshift(f)
+    magnitude = np.log(np.abs(fshift) + 1)
+    cy, cx = h // 2, w // 2
+    Y, X = np.ogrid[:h, :w]
+    dist = np.sqrt((X - cx) ** 2 + (Y - cy) ** 2)
+    max_dist = np.sqrt(cx ** 2 + cy ** 2)
+    emphasis = 0.5 + 0.5 * (dist / (max_dist + 1e-8))
+    magnitude = magnitude * emphasis
+    fft_map = cv2.normalize(magnitude, None, 0, 1, cv2.NORM_MINMAX).astype(np.float32)
 
-os.makedirs(RESULTS_DIR, exist_ok=True)
-os.makedirs(OUTPUT_DIR, exist_ok=True)
+    # 3. MULTI-QUALITY ELA
+    ela_fused = np.zeros((h, w), dtype=np.float32)
+    for quality in [90, 75]:
+        _, enc = cv2.imencode('.jpg', image_rgb, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        compressed = cv2.imdecode(enc, cv2.IMREAD_COLOR)
+        compressed = cv2.cvtColor(compressed, cv2.COLOR_BGR2RGB)
+        ela_diff = cv2.absdiff(image_rgb, compressed)
+        ela_gray = cv2.cvtColor(ela_diff, cv2.COLOR_RGB2GRAY).astype(np.float32)
+        max_diff = ela_gray.max()
+        scale = 255.0 / max_diff if max_diff != 0 else 1
+        ela_gray = np.clip(ela_gray * scale, 0, 255) / 255.0
+        ela_fused += ela_gray * 0.5
+    
+    return edge_fused, fft_map, ela_fused
 
-
-def create_base_transform(size):
-    return Compose([
-        IsotropicResize(max_side=size, interpolation_down=cv2.INTER_AREA, interpolation_up=cv2.INTER_CUBIC),
-        PadIfNeeded(min_height=size, min_width=size, border_mode=cv2.BORDER_CONSTANT),
-    ])
-
-
-def save_roc_curves(correct_labels, preds, model_name, accuracy, loss, f1):
-    plt.figure(1)
+def save_roc_curve(correct_labels, preds, model_name, output_dir):
+    plt.figure()
     plt.plot([0, 1], [0, 1], 'k--')
-
     fpr, tpr, _ = metrics.roc_curve(correct_labels, preds)
-    model_auc = auc(fpr, tpr)
-
+    model_auc = metrics.auc(fpr, tpr)
     plt.plot(fpr, tpr, label=f"{model_name} (AUC={model_auc:.3f})")
     plt.xlabel('False positive rate')
     plt.ylabel('True positive rate')
     plt.title('ROC Curve')
     plt.legend(loc='best')
-
-    plt.savefig(os.path.join(
-        OUTPUT_DIR,
-        f"{model_name}_acc{accuracy*100:.2f}_loss{loss:.4f}_f1{f1:.4f}.jpg"
-    ))
+    os.makedirs(output_dir, exist_ok=True)
+    plt.savefig(os.path.join(output_dir, f"{model_name}_roc.png"))
     plt.clf()
 
-
-def read_frames(video_path, videos):
-
-    method = get_method(video_path, DATA_DIR)
-
-    if "Original" in video_path:
-        label = 0.
-    else:
-        label = 1.
-
-    selected_frames = []
-
-    frames = os.listdir(video_path)
-    frames_number = len(frames)
-
-    if frames_number == 0:
-        return
-
-    frames_interval = max(1, int(frames_number / opt.frames_per_video))
-
-    frames = frames[::frames_interval][:opt.frames_per_video]
-
-    video = []
-
-    for frame in frames:
-
-        img_path = os.path.join(video_path, frame)
-        image = cv2.imread(img_path)
-
-        if image is None:
-            continue
-
-        transform = create_base_transform(config['model']['image-size'])
-        image = transform(image=image)['image']
-
-        video.append(image)
-
-    if len(video) > 0:
-        videos.append((video, label, video_path, frames))
-
-
 if __name__ == "__main__":
-
     parser = argparse.ArgumentParser()
+    parser.add_argument('--model_path', type=str, required=True)
+    parser.add_argument('--config', type=str, required=True)
+    parser.add_argument('--batch_size', type=int, default=16)
+    parser.add_argument('--output_dir', type=str, default='eval_results')
+    
+    args = parser.parse_args()
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    with open(args.config, 'r') as f:
+        config = yaml.safe_load(f)
+    size = config['model']['image-size']
 
-    parser.add_argument('--workers', default=8, type=int)
-    parser.add_argument('--model_path', type=str)
-    parser.add_argument('--dataset', type=str, default='All')
-    parser.add_argument('--frames_per_video', type=int, default=20)
-    parser.add_argument('--batch_size', type=int, default=8)
-    parser.add_argument('--config', type=str)
-
-    opt = parser.parse_args()
-
-    print(opt)
-
-    with open(opt.config, 'r') as ymlfile:
-        config = yaml.safe_load(ymlfile)
-
-    if not os.path.exists(opt.model_path):
-        print("ERROR: Model checkpoint not found.")
-        exit()
-
-    channels = 1280
-
-    model = EfficientViT(config=config, channels=channels, selected_efficient_net=0)
-
-    checkpoint = torch.load(opt.model_path, map_location=device)
-    model.load_state_dict(checkpoint)
-
-    model.to(device)
+    # Initialize Model
+    model = ConvNeXtCrossViT().to(device)
+    checkpoint = torch.load(args.model_path, map_location=device)
+    if 'model' in checkpoint:
+        model.load_state_dict(checkpoint['model'])
+    else:
+        model.load_state_dict(checkpoint)
     model.eval()
+    print(f"Model loaded from {args.model_path}")
 
-    # Test Time Augmentation wrapper
-    tta_transforms = tta.Compose([
-        tta.HorizontalFlip(),
-        tta.Rotate90(angles=[0, 90]),
+    # Transform
+    transform = Compose([
+        IsotropicResize(max_side=size, interpolation_down=cv2.INTER_AREA, interpolation_up=cv2.INTER_CUBIC),
+        PadIfNeeded(min_height=size, min_width=size, border_mode=cv2.BORDER_CONSTANT),
     ])
 
-    model = tta.ClassificationTTAWrapper(model, tta_transforms)
-
-    print("Model loaded.")
-
-    mgr = Manager()
-    videos = mgr.list()
-    paths = []
-
-    if opt.dataset == 'All':
-        folders = ["Original", "Face2Face", "FaceShifter", "FaceSwap", "NeuralTextures", "Deepfakes"]
-    else:
-        folders = [opt.dataset, "Original"]
-
-    for folder in folders:
-
-        method_folder = os.path.join(TEST_DIR, folder)
-
-        if not os.path.exists(method_folder):
+    # Dataset Scan
+    TEST_DIR = "../deep_fakes_explain/dataset/test_set"
+    dataset = []
+    for label, folder in [(0, "real"), (1, "fake")]:
+        folder_path = os.path.join(TEST_DIR, folder)
+        if not os.path.exists(folder_path):
             continue
+        for f in os.listdir(folder_path):
+            if f.lower().endswith((".jpg", ".jpeg", ".png")):
+                dataset.append((os.path.join(folder_path, f), label))
+    
+    print(f"Total test samples: {len(dataset)}")
+    
+    all_probs = []
+    all_labels = []
+    
+    # Simple batching (manual to avoid excessive Dataloader complexity for forensic compute)
+    for i in tqdm(range(0, len(dataset), args.batch_size)):
+        batch_info = dataset[i : i + args.batch_size]
+        batch_images = []
+        batch_labels = []
+        
+        for img_path, label in batch_info:
+            image = cv2.imread(img_path)
+            if image is None: continue
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+            image = transform(image=image)['image']
+            
+            # Forensic features
+            edge, fft, ela = compute_dip_features(image)
+            
+            # RGB Normalization (Parity with training)
+            rgb = image.astype(np.float32) / 255.0
+            mean = np.array([0.485, 0.456, 0.406])
+            std = np.array([0.229, 0.224, 0.225])
+            rgb = (rgb - mean) / std
+            
+            # Combine into 6-channel stack
+            input_stack = np.concatenate([
+                rgb, 
+                edge[..., np.newaxis], 
+                fft[..., np.newaxis], 
+                ela[..., np.newaxis]
+            ], axis=-1)
+            
+            batch_images.append(input_stack)
+            batch_labels.append(label)
+            
+        if not batch_images: continue
+        
+        # (N, H, W, 6) -> (N, 6, H, W)
+        input_tensor = torch.from_numpy(np.stack(batch_images)).permute(0, 3, 1, 2).float().to(device)
+        
+        with torch.no_grad():
+            output = model(input_tensor)
+            probs = torch.sigmoid(output).cpu().numpy().flatten()
+            
+        all_probs.extend(probs)
+        all_labels.extend(batch_labels)
 
-        for video_folder in os.listdir(method_folder):
-            paths.append(os.path.join(method_folder, video_folder))
+    all_probs = np.array(all_probs)
+    all_labels = np.array(all_labels)
+    all_preds = (all_probs > 0.5).astype(int)
 
-    print("Total videos:", len(paths))
+    # Metrics
+    acc = accuracy_score(all_labels, all_preds)
+    prec = precision_score(all_labels, all_preds, zero_division=0)
+    rec = recall_score(all_labels, all_preds, zero_division=0)
+    f1 = f1_score(all_labels, all_preds, zero_division=0)
+    
+    print("\n" + "="*30)
+    print("      TEST SET RESULTS")
+    print("="*30)
+    print(f"Accuracy:  {acc:.4f}")
+    print(f"Precision: {prec:.4f}")
+    print(f"Recall:    {rec:.4f}")
+    print(f"F1 Score:  {f1:.4f}")
+    print("="*30)
 
-    with Pool(processes=opt.workers) as p:
-        with tqdm(total=len(paths)) as pbar:
-            for _ in p.imap_unordered(partial(read_frames, videos=videos), paths):
-                pbar.update()
-
-    videos = list(videos)
-
-    video_names = np.asarray([row[2] for row in videos])
-    correct_test_labels = np.asarray([row[1] for row in videos])
-    frames = [row[0] for row in videos]
-
-    preds = []
-
-    bar = Bar('Predicting', max=len(frames))
-
-    for index, video in enumerate(frames):
-
-        faces_preds = []
-
-        for i in range(0, len(video), opt.batch_size):
-
-            batch = video[i:i + opt.batch_size]
-
-            batch = torch.tensor(np.asarray(batch))
-            batch = batch.permute(0, 3, 1, 2).float().to(device)
-
-            with torch.no_grad():
-
-                pred = model(batch)
-
-                pred = torch.sigmoid(pred)
-
-            faces_preds.extend(pred.cpu().numpy())
-
-        video_pred = np.mean(faces_preds)
-
-        preds.append(video_pred)
-
-        bar.next()
-
-    bar.finish()
-
-    preds = np.asarray(preds)
-
-    loss_fn = torch.nn.BCEWithLogitsLoss()
-
-    tensor_labels = torch.tensor(correct_test_labels).unsqueeze(1).float()
-    tensor_preds = torch.tensor(preds).unsqueeze(1)
-
-    loss = loss_fn(tensor_preds, tensor_labels).item()
-
-    accuracy = accuracy_score(custom_round(preds), correct_test_labels)
-    f1 = f1_score(correct_test_labels, custom_round(preds))
-
-    print("Accuracy:", accuracy)
-    print("Loss:", loss)
-    print("F1:", f1)
-
-    save_roc_curves(correct_test_labels, preds, "EfficientViT", accuracy, loss, f1)
+    save_roc_curve(all_labels, all_probs, "ConvNeXt_TestSet", args.output_dir)
+    print(f"ROC curve saved to {args.output_dir}")

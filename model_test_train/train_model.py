@@ -6,6 +6,7 @@ import yaml
 import argparse
 import collections
 import time
+import csv
 
 
 from torch.utils.data import WeightedRandomSampler
@@ -29,6 +30,8 @@ VALIDATION_DIR = os.path.join(DATA_DIR, "validation_set")
 
 MODELS_PATH = os.path.join(BASE_DIR, "models")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
+RESULTS_CSV = os.path.join(BASE_DIR, "training_results.csv")
+EPOCH_1_SUMMARY = os.path.join(BASE_DIR, "epoch_1_summary.txt")
 
 
 if __name__ == "__main__":
@@ -63,11 +66,7 @@ if __name__ == "__main__":
         weight_decay=float(config['training']['weight-decay'])
     )
 
-    scheduler = lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=config['training'].get('T_max', opt.num_epochs),
-        eta_min=config['training'].get('eta_min', 1e-6)
-    )
+    # scheduler initialization moved after data loading to calculate total steps
 
     writer = SummaryWriter(LOG_DIR)
 
@@ -75,30 +74,10 @@ if __name__ == "__main__":
 
     start_epoch = 0
     best_val_acc = 0
+    previous_val_acc = 0
     not_improved_loss = 0
     previous_loss = math.inf
 
-    auto_resume_path = os.path.join(MODELS_PATH, "last_checkpoint.pth")
-    if opt.resume == '' and os.path.exists(auto_resume_path):
-        print(f"Auto-resume found checkpoint at {auto_resume_path}")
-        opt.resume = auto_resume_path
-
-    if opt.resume != '':
-        if os.path.exists(opt.resume):
-            checkpoint = torch.load(opt.resume, map_location=device)
-            model.load_state_dict(checkpoint['model'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            if 'epoch' in checkpoint:
-                start_epoch = checkpoint['epoch'] + 1
-            if 'best_val_acc' in checkpoint:
-                best_val_acc = checkpoint['best_val_acc']
-            if 'scheduler' in checkpoint:
-                scheduler.load_state_dict(checkpoint['scheduler'])
-            if 'scaler' in checkpoint:
-                scaler.load_state_dict(checkpoint['scaler'])
-            print(f"Checkpoint loaded. Resuming from epoch {start_epoch}")
-        else:
-            print(f"Resume path {opt.resume} does not exist.")
 
     print("\nScanning dataset...\n")
 
@@ -198,8 +177,52 @@ if __name__ == "__main__":
 
     accumulation_steps = config['training'].get('accumulation_steps', 2)
 
+    # Calculate total steps for OneCycleLR
+    total_steps = (len(dl) * opt.num_epochs) // accumulation_steps
+    
+    scheduler = lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=float(config['training']['lr']),
+        total_steps=total_steps,
+        pct_start=0.3,
+        div_factor=25,
+        final_div_factor=1000
+    )
+
     print("\nStarting training...\n")
-    print(f"Gradient accumulation steps: {accumulation_steps} (effective batch size: {int(config['training']['bs']) * accumulation_steps})")
+    print(f"Gradient accumulation steps: {accumulation_steps}")
+    print(f"Total optimizer steps: {total_steps}")
+    print(f"Label smoothing: {config['training'].get('label_smoothing', 0.1)}")
+    print(f"Effective batch size: {int(config['training']['bs']) * accumulation_steps}")
+
+    auto_resume_path = os.path.join(MODELS_PATH, "last_checkpoint.pth")
+    if opt.resume == '' and os.path.exists(auto_resume_path):
+        print(f"Auto-resume found checkpoint at {auto_resume_path}")
+        opt.resume = auto_resume_path
+
+    if opt.resume != '':
+        if os.path.exists(opt.resume):
+            checkpoint = torch.load(opt.resume, map_location=device)
+            model.load_state_dict(checkpoint['model'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            if 'epoch' in checkpoint:
+                start_epoch = checkpoint['epoch'] + 1
+            if 'best_val_acc' in checkpoint:
+                best_val_acc = checkpoint['best_val_acc']
+                previous_val_acc = checkpoint.get('previous_val_acc', best_val_acc)
+            if 'scheduler' in checkpoint:
+                scheduler.load_state_dict(checkpoint['scheduler'])
+            if 'scaler' in checkpoint:
+                scaler.load_state_dict(checkpoint['scaler'])
+            print(f"Checkpoint loaded. Resuming from epoch {start_epoch}")
+        else:
+            print(f"Resume path {opt.resume} does not exist.")
+
+    # Initialize CSV header if file does not exist
+    if not os.path.exists(RESULTS_CSV):
+        with open(RESULTS_CSV, 'w', newline='') as f:
+            writer_csv = csv.writer(f)
+            writer_csv.writerow(['epoch', 'train_loss', 'train_acc', 'val_loss', 'val_acc', 'precision', 'recall', 'f1', 'time_min'])
 
     for epoch in range(start_epoch, opt.num_epochs):
 
@@ -225,9 +248,13 @@ if __name__ == "__main__":
             images = images.to(device, non_blocking=True)
             labels = labels.unsqueeze(1).float().to(device, non_blocking=True)
 
+            # Manual Label Smoothing (for compatibility with older Torch versions)
+            smoothing = config['training'].get('label_smoothing', 0.1)
+            smoothed_labels = labels * (1 - smoothing) + 0.5 * smoothing
+
             with autocast(device_type="cuda", dtype=torch.bfloat16):
                 preds = model(images)
-                loss = loss_fn(preds, labels) / accumulation_steps
+                loss = loss_fn(preds, smoothed_labels) / accumulation_steps
 
             scaler.scale(loss).backward()
 
@@ -235,6 +262,7 @@ if __name__ == "__main__":
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
+                scheduler.step()
 
             corrects, _, _ = check_correct(
                 preds.detach().cpu(),
@@ -248,7 +276,9 @@ if __name__ == "__main__":
             total_loss += loss.item() * accumulation_steps
             counter_batches += 1
 
-            pbar.set_postfix(loss=loss.item() * accumulation_steps)
+            # Get current LR for logging
+            current_lr = optimizer.param_groups[0]['lr']
+            pbar.set_postfix(loss=loss.item() * accumulation_steps, lr=f"{current_lr:.6f}")
 
         train_accuracy = train_correct / train_seen
         total_loss /= counter_batches
@@ -291,7 +321,7 @@ if __name__ == "__main__":
         recall = recall_score(all_labels, all_preds, zero_division=0)
         f1 = f1_score(all_labels, all_preds, zero_division=0)
 
-        scheduler.step()
+        # scheduler.step() moved to training loop
 
         writer.add_scalar("Loss/train", total_loss, epoch)
         writer.add_scalar("Loss/validation", val_loss, epoch)
@@ -318,6 +348,10 @@ if __name__ == "__main__":
             f"| f1:{f1:.4f}"
         )
 
+        if epoch > start_epoch and val_accuracy < previous_val_acc * 0.90:
+            print(f"\nAccuracy dropped significantly ({previous_val_acc:.4f} -> {val_accuracy:.4f}). Stopping training to prevent divergence.")
+            break
+
         os.makedirs(MODELS_PATH, exist_ok=True)
         
         checkpoint_dict = {
@@ -325,6 +359,7 @@ if __name__ == "__main__":
             'optimizer': optimizer.state_dict(),
             'epoch': epoch,
             'best_val_acc': best_val_acc,
+            'previous_val_acc': val_accuracy,
             'scheduler': scheduler.state_dict(),
             'scaler': scaler.state_dict()
         }
@@ -345,6 +380,39 @@ if __name__ == "__main__":
             not_improved_loss = 0
 
         previous_loss = val_loss
+        previous_val_acc = val_accuracy
 
         torch.save(checkpoint_dict, os.path.join(MODELS_PATH, f"checkpoint_epoch_{epoch+1}.pth"))
         torch.save(checkpoint_dict, os.path.join(MODELS_PATH, "last_checkpoint.pth"))
+
+        # Log results to CSV
+        with open(RESULTS_CSV, 'a', newline='') as f:
+            writer_csv = csv.writer(f)
+            writer_csv.writerow([
+                epoch + 1,
+                f"{total_loss:.4f}",
+                f"{train_accuracy:.4f}",
+                f"{val_loss:.4f}",
+                f"{val_accuracy:.4f}",
+                f"{precision:.4f}",
+                f"{recall:.4f}",
+                f"{f1:.4f}",
+                f"{epoch_minutes:.2f}"
+            ])
+
+        # Store epoch 1 results specifically
+        if epoch + 1 == 1:
+            with open(EPOCH_1_SUMMARY, 'w') as f:
+                f.write("--- EPOCH 1 RESULTS SUMMARY ---\n")
+                f.write(f"Date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Configuration: {opt.config}\n")
+                f.write(f"Train Loss: {total_loss:.4f}\n")
+                f.write(f"Train Accuracy: {train_accuracy:.4f}\n")
+                f.write(f"Validation Loss: {val_loss:.4f}\n")
+                f.write(f"Validation Accuracy: {val_accuracy:.4f}\n")
+                f.write(f"Precision: {precision:.4f}\n")
+                f.write(f"Recall: {recall:.4f}\n")
+                f.write(f"F1 Score: {f1:.4f}\n")
+                f.write(f"Epoch Time: {epoch_minutes:.2f} min\n")
+                f.write("-------------------------------\n")
+            print(f"Epoch 1 results stored in {EPOCH_1_SUMMARY}")

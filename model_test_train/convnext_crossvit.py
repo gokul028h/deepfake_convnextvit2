@@ -81,7 +81,28 @@ class ConvNeXtCrossViT(nn.Module):
             global_pool=""
         )
 
-        # Use pretrained 3-channel stem as-is (full ImageNet transfer learning)
+        # Replace stem for 6-channel input (3 RGB + 3 DIP: edge, FFT, ELA)
+        old_conv = self.backbone.stem[0]
+
+        new_conv = nn.Conv2d(
+            6,
+            old_conv.out_channels,
+            kernel_size=old_conv.kernel_size,
+            stride=old_conv.stride,
+            padding=old_conv.padding,
+            bias=old_conv.bias is not None
+        )
+
+        # Copy pretrained RGB weights to first 3 channels
+        new_conv.weight.data[:, :3] = old_conv.weight.data
+        # Copy pretrained weights to DIP channels too (better than random init
+        # since DIP maps are structured image-like data)
+        new_conv.weight.data[:, 3:] = old_conv.weight.data
+
+        if old_conv.bias is not None:
+            new_conv.bias.data = old_conv.bias.data
+
+        self.backbone.stem[0] = new_conv
 
         channels = self.backbone.num_features
 
