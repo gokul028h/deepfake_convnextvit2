@@ -1,0 +1,12 @@
+--- EPOCH 1 RESULTS SUMMARY ---
+Date: 2026-03-13 07:43:06
+Configuration: configs/explained_architecture.yaml
+Train Loss: 0.5987
+Train Accuracy: 0.6707
+Validation Loss: 0.3714
+Validation Accuracy: 0.8417
+Precision: 0.9358
+Recall: 0.7338
+F1 Score: 0.8226
+Epoch Time: 12.30 min
+-------------------------------
